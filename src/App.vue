@@ -4,15 +4,8 @@
   </div>
 </template>
 
-<script>
+<script setup>
 import STPViewer from './components/STPViewer.vue'
-
-export default {
-  name: 'App',
-  components: {
-    STPViewer
-  }
-}
 </script>
 
 <style>

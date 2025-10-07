@@ -29,7 +29,7 @@
           ref="fileInput"
           class="file-input"
         />
-        <button @click="$refs.fileInput.click()" class="btn btn-primary">
+        <button @click="fileInput && fileInput.click()" class="btn btn-primary">
           <span class="icon">📁</span>
           Choose STP File
         </button>
@@ -97,7 +97,7 @@
           <div class="drop-icon">📁</div>
           <h3>Drop your STP file here</h3>
           <p>Supports .stp and .step files</p>
-          <button @click="$refs.fileInput.click()" class="btn btn-primary large">
+          <button @click="fileInput && fileInput.click()" class="btn btn-primary large">
             <span class="icon">📁</span>
             Browse Files
           </button>
@@ -161,457 +161,388 @@
   </div>
 </template>
 
-<script>
+<script setup>
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-export default {
-  name: 'STPViewer',
-  data() {
-    return {
-      // State
-      meshes: [],
-      loading: false,
-      loadingStatus: '',
-      loadingProgress: 0,
-      error: null,
-      wireframe: false,
-      showGrid: true,
-      showInfoPanel: true,
-      modelInfo: null,
-      selectedMesh: '',
-      fileType: '',
-      isDragOver: false,
-      isDestroyed: false,
-      
-      // OCCT library
-      occt: null,
-      occtLoaded: false
+// Reactive state
+const meshes = ref([])
+const loading = ref(false)
+const loadingStatus = ref('')
+const loadingProgress = ref(0)
+const error = ref(null)
+const wireframe = ref(false)
+const showGrid = ref(true)
+const showInfoPanel = ref(true)
+const modelInfo = ref(null)
+const selectedMesh = ref('')
+const fileType = ref('')
+const isDragOver = ref(false)
+
+// Non-reactive instance fields
+let scene = null
+let camera = null
+let renderer = null
+let controls = null
+let gridHelper = null
+let isDestroyed = false
+
+// OCCT
+let occt = null
+const occtLoaded = ref(false)
+
+// Refs
+const canvasContainer = ref(null)
+const fileInput = ref(null)
+
+const hasModel = computed(() => meshes.value.length > 0)
+
+async function loadOCCTLibrary() {
+  try {
+    loadingStatus.value = 'Loading OCCT library...'
+    let occtimportjs
+    try {
+      occtimportjs = (await import('occt-import-js')).default
+    } catch (importError) {
+      console.error('Failed to import occt-import-js:', importError)
+      throw importError
     }
-  },
-  created() {
-    // Initialize Three.js objects outside of Vue's reactivity system
-    this.scene = null
-    this.camera = null
-    this.renderer = null
-    this.controls = null
-    this.gridHelper = null
-  },
-  computed: {
-    hasModel() {
-      return this.meshes.length > 0
-    }
-  },
-  async mounted() {
-    this.initThreeJS()
-    this.animate()
-    // Load OCCT library in background
-    this.loadOCCTLibrary()
-  },
-  beforeUnmount() {
-    this.isDestroyed = true
-    this.disposeThreeJS()
-    window.removeEventListener('resize', this.onWindowResize)
-  },
-  methods: {
-    async loadOCCTLibrary() {
-      try {
-        this.loadingStatus = 'Loading OCCT library...'
-        console.log('Attempting to load OCCT library...')
-        
-        // Try different import methods
-        let occtimportjs
-        try {
-          occtimportjs = (await import('occt-import-js')).default
-        } catch (importError) {
-          console.error('Failed to import occt-import-js:', importError)
-          throw importError
+    occt = await occtimportjs({
+      locateFile: (path) => {
+        if (path.endsWith('.wasm')) {
+          return '/occt-import-js.wasm'
         }
-        
-        console.log('OCCT import function loaded, initializing...')
-        
-        // Initialize OCCT with proper WASM path
-        this.occt = await occtimportjs({
-          locateFile: (path) => {
-            if (path.endsWith('.wasm')) {
-              return '/occt-import-js.wasm'
-            }
-            return path
-          }
-        })
-        
-        this.occtLoaded = true
-        console.log('OCCT library loaded successfully')
-      } catch (error) {
-        console.error('OCCT library loading failed:', error)
-        this.occtLoaded = false
-        this.error = 'Failed to load OCCT library. Please refresh the page and try again. Error: ' + error.message
+        return path
       }
-    },
+    })
+    occtLoaded.value = true
+  } catch (e) {
+    console.error('OCCT library loading failed:', e)
+    occtLoaded.value = false
+    error.value = 'Failed to load OCCT library. Please refresh the page and try again. Error: ' + e.message
+  }
+}
 
-    initThreeJS() {
-      const container = this.$refs.canvasContainer
-      const width = container.clientWidth
-      const height = container.clientHeight
+function initThreeJS() {
+  const container = canvasContainer.value
+  const width = container.clientWidth
+  const height = container.clientHeight
 
-      // Scene
-      this.scene = new THREE.Scene()
-      this.scene.background = new THREE.Color(0xf5f5f5)
+  scene = new THREE.Scene()
+  scene.background = new THREE.Color(0xf5f5f5)
 
-      // Camera
-      this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 10000)
-      this.camera.position.set(100, 100, 100)
-      
-      // Ensure camera matrix is properly initialized
-      this.camera.updateMatrixWorld()
+  camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 10000)
+  camera.position.set(100, 100, 100)
+  camera.updateMatrixWorld()
 
-      // Renderer
-      this.renderer = new THREE.WebGLRenderer({ 
-        antialias: true,
-        alpha: true
-      })
-      this.renderer.setSize(width, height)
-      this.renderer.shadowMap.enabled = true
-      this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
-      this.renderer.outputColorSpace = THREE.SRGBColorSpace
-      container.appendChild(this.renderer.domElement)
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+  renderer.setSize(width, height)
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+  container.appendChild(renderer.domElement)
 
-      // Controls
-      this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-      this.controls.enableDamping = true
-      this.controls.dampingFactor = 0.05
-      this.controls.screenSpacePanning = false
-      this.controls.minDistance = 1
-      this.controls.maxDistance = 1000
+  controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.dampingFactor = 0.05
+  controls.screenSpacePanning = false
+  controls.minDistance = 1
+  controls.maxDistance = 1000
 
-      // Lighting
-      const ambientLight = new THREE.AmbientLight(0x404040, 0.4)
-      this.scene.add(ambientLight)
+  const ambientLight = new THREE.AmbientLight(0x404040, 0.4)
+  scene.add(ambientLight)
 
-      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-      directionalLight.position.set(100, 100, 50)
-      directionalLight.castShadow = true
-      directionalLight.shadow.mapSize.width = 2048
-      directionalLight.shadow.mapSize.height = 2048
-      this.scene.add(directionalLight)
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
+  directionalLight.position.set(100, 100, 50)
+  directionalLight.castShadow = true
+  directionalLight.shadow.mapSize.width = 2048
+  directionalLight.shadow.mapSize.height = 2048
+  scene.add(directionalLight)
 
-      const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3)
-      this.scene.add(hemisphereLight)
+  const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3)
+  scene.add(hemisphereLight)
 
-      // Grid
-      this.gridHelper = new THREE.GridHelper(200, 20, 0x888888, 0xcccccc)
-      this.scene.add(this.gridHelper)
+  gridHelper = new THREE.GridHelper(200, 20, 0x888888, 0xcccccc)
+  scene.add(gridHelper)
 
-      // Handle window resize
-      window.addEventListener('resize', this.onWindowResize)
-    },
+  window.addEventListener('resize', onWindowResize)
+}
 
-    handleFileUpload(event) {
-      const file = event.target.files[0]
-      if (file) {
-        this.loadFile(file)
-      }
-    },
+function handleFileUpload(event) {
+  const file = event.target.files[0]
+  if (file) {
+    loadFile(file)
+  }
+}
 
-    handleFileDrop(event) {
-      event.preventDefault()
-      this.isDragOver = false
-      const file = event.dataTransfer.files[0]
-      if (file) {
-        const fileName = file.name.toLowerCase()
-        if (fileName.endsWith('.stp') || fileName.endsWith('.step')) {
-          this.loadFile(file)
-        } else {
-          this.error = 'Unsupported file format. Please use STP or STEP files.'
-        }
-      }
-    },
-
-    async loadFile(file) {
-      const fileName = file.name.toLowerCase()
-      
-      if (fileName.endsWith('.stp') || fileName.endsWith('.step')) {
-        this.fileType = 'STP/STEP'
-        
-        // Try to load OCCT if not already loaded
-        if (!this.occtLoaded) {
-          this.loading = true
-          this.loadingStatus = 'Loading OCCT library...'
-          await this.loadOCCTLibrary()
-          this.loading = false
-        }
-        
-        if (this.occtLoaded) {
-          await this.loadSTPFile(file)
-        } else {
-          this.error = 'STP/STEP file support requires the occt-import-js library. Please refresh the page and try again. If the problem persists, check the browser console for more details.'
-        }
-      } else {
-        this.error = 'Unsupported file format'
-      }
-    },
-
-    async loadSTPFile(file) {
-      this.loading = true
-      this.error = null
-      this.loadingProgress = 0
-      this.loadingStatus = 'Reading file...'
-
-      try {
-        const arrayBuffer = await this.readFileAsArrayBuffer(file)
-        this.loadingProgress = 30
-        this.loadingStatus = 'Parsing STEP geometry...'
-        
-         const fileBuffer = new Uint8Array(arrayBuffer)
-         const result = this.occt.ReadStepFile(fileBuffer)
-
-        if (!result.success) {
-          throw new Error('Failed to parse STEP file')
-        }
-
-        this.loadingProgress = 70
-        this.loadingStatus = 'Creating 3D meshes...'
-        await this.createMeshesFromOCCTResult(result, file)
-        
-        this.loadingProgress = 100
-        this.loading = false
-        this.loadingStatus = ''
-      } catch (error) {
-        console.error('Error loading STP file:', error)
-        this.error = 'Failed to load STP file: ' + error.message
-        this.loading = false
-        this.loadingStatus = ''
-        this.loadingProgress = 0
-      }
-    },
-
-    async createMeshesFromOCCTResult(result, file) {
-      this.clearMeshes()
-
-      const meshData = []
-      let totalVertices = 0
-      let totalFaces = 0
-
-      for (let i = 0; i < result.meshes.length; i++) {
-        const meshInfo = result.meshes[i]
-        
-        const geometry = new THREE.BufferGeometry()
-        
-        const positions = new Float32Array(meshInfo.attributes.position.array)
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-        
-        if (meshInfo.attributes.normal) {
-          const normals = new Float32Array(meshInfo.attributes.normal.array)
-          geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
-        } else {
-          geometry.computeVertexNormals()
-        }
-        
-        if (meshInfo.index) {
-          const indices = new Uint32Array(meshInfo.index.array)
-          geometry.setIndex(new THREE.BufferAttribute(indices, 1))
-        }
-
-        // Generate random color for each part
-        let color = new THREE.Color(0.2 + Math.random() * 0.6, 0.2 + Math.random() * 0.6, 0.2 + Math.random() * 0.6)
-        let colorHex = '#' + color.getHexString()
-        
-        if (meshInfo.color && meshInfo.color.length >= 3) {
-          color = new THREE.Color(meshInfo.color[0], meshInfo.color[1], meshInfo.color[2])
-          colorHex = '#' + color.getHexString()
-        }
-
-        const material = new THREE.MeshPhongMaterial({
-          color: color,
-          wireframe: this.wireframe,
-          side: THREE.DoubleSide
-        })
-
-        const mesh = new THREE.Mesh(geometry, material)
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        
-        this.scene.add(mesh)
-
-        const vertices = positions.length / 3
-        const faces = meshInfo.index ? meshInfo.index.array.length / 3 : vertices / 3
-        
-        meshData.push({
-          mesh: mesh,
-          name: meshInfo.name || `Part ${i + 1}`,
-          vertices: vertices,
-          faces: faces,
-          colorHex: colorHex
-        })
-
-        totalVertices += vertices
-        totalFaces += faces
-      }
-
-      this.meshes = meshData
-
-      this.modelInfo = {
-        meshCount: result.meshes.length,
-        totalVertices: totalVertices,
-        totalFaces: totalFaces,
-        fileSize: this.formatFileSize(file.size)
-      }
-
-      this.fitCameraToModel()
-    },
-
-    readFileAsArrayBuffer(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = (event) => resolve(event.target.result)
-        reader.onerror = () => reject(new Error('Failed to read file'))
-        reader.readAsArrayBuffer(file)
-      })
-    },
-
-    clearMeshes() {
-      this.meshes.forEach(meshData => {
-        if (meshData.mesh && this.scene) {
-          this.scene.remove(meshData.mesh)
-          meshData.mesh.geometry?.dispose()
-          meshData.mesh.material?.dispose()
-        }
-      })
-      this.meshes = []
-      this.modelInfo = null
-      this.selectedMesh = ''
-    },
-
-    fitCameraToModel() {
-      if (this.meshes.length === 0) return
-
-      const box = new THREE.Box3()
-      this.meshes.forEach(meshData => {
-        box.expandByObject(meshData.mesh)
-      })
-
-      const center = box.getCenter(new THREE.Vector3())
-      const size = box.getSize(new THREE.Vector3())
-      const maxDim = Math.max(size.x, size.y, size.z)
-      
-      const distance = maxDim * 1.5
-      this.camera.position.set(center.x + distance, center.y + distance, center.z + distance)
-      this.camera.lookAt(center)
-      this.controls.target.copy(center)
-      this.controls.update()
-    },
-
-    resetCamera() {
-      this.fitCameraToModel()
-    },
-
-    toggleWireframe() {
-      this.wireframe = !this.wireframe
-      this.meshes.forEach(meshData => {
-        meshData.mesh.material.wireframe = this.wireframe
-      })
-    },
-
-    toggleGrid() {
-      this.showGrid = !this.showGrid
-      this.gridHelper.visible = this.showGrid
-    },
-
-    toggleInfoPanel() {
-      this.showInfoPanel = !this.showInfoPanel
-    },
-
-    focusOnMesh() {
-      if (this.selectedMesh === '') {
-        this.meshes.forEach(meshData => {
-          meshData.mesh.visible = true
-        })
-        this.fitCameraToModel()
-      } else {
-        this.focusOnSingleMesh(this.selectedMesh)
-      }
-    },
-
-    focusOnSingleMesh(index) {
-      this.meshes.forEach((meshData, i) => {
-        meshData.mesh.visible = i == index
-      })
-      
-      const selectedMeshData = this.meshes[index]
-      if (selectedMeshData) {
-        const box = new THREE.Box3().setFromObject(selectedMeshData.mesh)
-        const center = box.getCenter(new THREE.Vector3())
-        const size = box.getSize(new THREE.Vector3())
-        const maxDim = Math.max(size.x, size.y, size.z)
-        
-        const distance = maxDim * 2
-        this.camera.position.set(center.x + distance, center.y + distance, center.z + distance)
-        this.camera.lookAt(center)
-        this.controls.target.copy(center)
-        this.controls.update()
-      }
-      
-      this.selectedMesh = index.toString()
-    },
-
-    clearError() {
-      this.error = null
-    },
-
-    formatFileSize(bytes) {
-      if (bytes === 0) return '0 Bytes'
-      const k = 1024
-      const sizes = ['Bytes', 'KB', 'MB', 'GB']
-      const i = Math.floor(Math.log(bytes) / Math.log(k))
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-    },
-
-    onWindowResize() {
-      const container = this.$refs.canvasContainer
-      const width = container.clientWidth
-      const height = container.clientHeight
-
-      this.camera.aspect = width / height
-      this.camera.updateProjectionMatrix()
-      this.renderer.setSize(width, height)
-    },
-
-    animate() {
-      if (this.isDestroyed) return
-      
-      requestAnimationFrame(this.animate)
-      if (this.controls) {
-        this.controls.update()
-      }
-      if (this.renderer && this.scene && this.camera) {
-        this.renderer.render(this.scene, this.camera)
-      }
-    },
-
-    disposeThreeJS() {
-      // Dispose of meshes
-      this.meshes.forEach(meshData => {
-        if (meshData.mesh) {
-          this.scene?.remove(meshData.mesh)
-          meshData.mesh.geometry?.dispose()
-          meshData.mesh.material?.dispose()
-        }
-      })
-      
-      // Dispose of renderer
-      if (this.renderer) {
-        this.renderer.dispose()
-        this.renderer = null
-      }
-      
-      // Clear other objects
-      this.scene = null
-      this.camera = null
-      this.controls = null
-      this.gridHelper = null
+function handleFileDrop(event) {
+  event.preventDefault()
+  isDragOver.value = false
+  const file = event.dataTransfer.files[0]
+  if (file) {
+    const fileName = file.name.toLowerCase()
+    if (fileName.endsWith('.stp') || fileName.endsWith('.step')) {
+      loadFile(file)
+    } else {
+      error.value = 'Unsupported file format. Please use STP or STEP files.'
     }
   }
 }
+
+async function loadFile(file) {
+  const fileName = file.name.toLowerCase()
+  if (fileName.endsWith('.stp') || fileName.endsWith('.step')) {
+    fileType.value = 'STP/STEP'
+    if (!occtLoaded.value) {
+      loading.value = true
+      loadingStatus.value = 'Loading OCCT library...'
+      await loadOCCTLibrary()
+      loading.value = false
+    }
+    if (occtLoaded.value) {
+      await loadSTPFile(file)
+    } else {
+      error.value = 'STP/STEP file support requires the occt-import-js library. Please refresh the page and try again. If the problem persists, check the browser console for more details.'
+    }
+  } else {
+    error.value = 'Unsupported file format'
+  }
+}
+
+async function loadSTPFile(file) {
+  loading.value = true
+  error.value = null
+  loadingProgress.value = 0
+  loadingStatus.value = 'Reading file...'
+  try {
+    const arrayBuffer = await readFileAsArrayBuffer(file)
+    loadingProgress.value = 30
+    loadingStatus.value = 'Parsing STEP geometry...'
+    const fileBuffer = new Uint8Array(arrayBuffer)
+    const result = occt.ReadStepFile(fileBuffer)
+    if (!result.success) {
+      throw new Error('Failed to parse STEP file')
+    }
+    loadingProgress.value = 70
+    loadingStatus.value = 'Creating 3D meshes...'
+    await createMeshesFromOCCTResult(result, file)
+    loadingProgress.value = 100
+    loading.value = false
+    loadingStatus.value = ''
+  } catch (e) {
+    console.error('Error loading STP file:', e)
+    error.value = 'Failed to load STP file: ' + e.message
+    loading.value = false
+    loadingStatus.value = ''
+    loadingProgress.value = 0
+  }
+}
+
+async function createMeshesFromOCCTResult(result, file) {
+  clearMeshes()
+  const meshData = []
+  let totalVertices = 0
+  let totalFaces = 0
+  for (let i = 0; i < result.meshes.length; i++) {
+    const meshInfo = result.meshes[i]
+    const geometry = new THREE.BufferGeometry()
+    const positions = new Float32Array(meshInfo.attributes.position.array)
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    if (meshInfo.attributes.normal) {
+      const normals = new Float32Array(meshInfo.attributes.normal.array)
+      geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+    } else {
+      geometry.computeVertexNormals()
+    }
+    if (meshInfo.index) {
+      const indices = new Uint32Array(meshInfo.index.array)
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+    }
+    let color = new THREE.Color(0.2 + Math.random() * 0.6, 0.2 + Math.random() * 0.6, 0.2 + Math.random() * 0.6)
+    let colorHex = '#' + color.getHexString()
+    if (meshInfo.color && meshInfo.color.length >= 3) {
+      color = new THREE.Color(meshInfo.color[0], meshInfo.color[1], meshInfo.color[2])
+      colorHex = '#' + color.getHexString()
+    }
+    const material = new THREE.MeshPhongMaterial({
+      color: color,
+      wireframe: wireframe.value,
+      side: THREE.DoubleSide
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    scene.add(mesh)
+    const vertices = positions.length / 3
+    const faces = meshInfo.index ? meshInfo.index.array.length / 3 : vertices / 3
+    meshData.push({
+      mesh: mesh,
+      name: meshInfo.name || `Part ${i + 1}`,
+      vertices: vertices,
+      faces: faces,
+      colorHex: colorHex
+    })
+    totalVertices += vertices
+    totalFaces += faces
+  }
+  meshes.value = meshData
+  modelInfo.value = {
+    meshCount: result.meshes.length,
+    totalVertices: totalVertices,
+    totalFaces: totalFaces,
+    fileSize: formatFileSize(file.size)
+  }
+  fitCameraToModel()
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(event.target.result)
+    reader.onerror = () => reject(new Error('Failed to read file'))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+function clearMeshes() {
+  meshes.value.forEach(meshData => {
+    if (meshData.mesh && scene) {
+      scene.remove(meshData.mesh)
+      meshData.mesh.geometry?.dispose()
+      meshData.mesh.material?.dispose()
+    }
+  })
+  meshes.value = []
+  modelInfo.value = null
+  selectedMesh.value = ''
+}
+
+function fitCameraToModel() {
+  if (meshes.value.length === 0) return
+  const box = new THREE.Box3()
+  meshes.value.forEach(meshData => {
+    box.expandByObject(meshData.mesh)
+  })
+  const center = box.getCenter(new THREE.Vector3())
+  const size = box.getSize(new THREE.Vector3())
+  const maxDim = Math.max(size.x, size.y, size.z)
+  const distance = maxDim * 1.5
+  camera.position.set(center.x + distance, center.y + distance, center.z + distance)
+  camera.lookAt(center)
+  controls.target.copy(center)
+  controls.update()
+}
+
+function resetCamera() {
+  fitCameraToModel()
+}
+
+function toggleWireframe() {
+  wireframe.value = !wireframe.value
+  meshes.value.forEach(meshData => {
+    meshData.mesh.material.wireframe = wireframe.value
+  })
+}
+
+function toggleGrid() {
+  showGrid.value = !showGrid.value
+  if (gridHelper) gridHelper.visible = showGrid.value
+}
+
+function toggleInfoPanel() {
+  showInfoPanel.value = !showInfoPanel.value
+}
+
+function focusOnMesh() {
+  if (selectedMesh.value === '') {
+    meshes.value.forEach(meshData => {
+      meshData.mesh.visible = true
+    })
+    fitCameraToModel()
+  } else {
+    focusOnSingleMesh(selectedMesh.value)
+  }
+}
+
+function focusOnSingleMesh(index) {
+  meshes.value.forEach((meshData, i) => {
+    meshData.mesh.visible = i == index
+  })
+  const selectedMeshData = meshes.value[index]
+  if (selectedMeshData) {
+    const box = new THREE.Box3().setFromObject(selectedMeshData.mesh)
+    const center = box.getCenter(new THREE.Vector3())
+    const size = box.getSize(new THREE.Vector3())
+    const maxDim = Math.max(size.x, size.y, size.z)
+    const distance = maxDim * 2
+    camera.position.set(center.x + distance, center.y + distance, center.z + distance)
+    camera.lookAt(center)
+    controls.target.copy(center)
+    controls.update()
+  }
+  selectedMesh.value = index.toString()
+}
+
+function clearError() {
+  error.value = null
+}
+
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes'
+  const k = 1024
+  const sizes = ['Bytes', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+function onWindowResize() {
+  const container = canvasContainer.value
+  const width = container.clientWidth
+  const height = container.clientHeight
+  camera.aspect = width / height
+  camera.updateProjectionMatrix()
+  renderer.setSize(width, height)
+}
+
+function animate() {
+  if (isDestroyed) return
+  requestAnimationFrame(animate)
+  if (controls) controls.update()
+  if (renderer && scene && camera) {
+    renderer.render(scene, camera)
+  }
+}
+
+function disposeThreeJS() {
+  meshes.value.forEach(meshData => {
+    if (meshData.mesh) {
+      scene?.remove(meshData.mesh)
+      meshData.mesh.geometry?.dispose()
+      meshData.mesh.material?.dispose()
+    }
+  })
+  if (renderer) {
+    renderer.dispose()
+    renderer = null
+  }
+  scene = null
+  camera = null
+  controls = null
+  gridHelper = null
+}
+
+onMounted(() => {
+  initThreeJS()
+  animate()
+  loadOCCTLibrary()
+})
+
+onBeforeUnmount(() => {
+  isDestroyed = true
+  disposeThreeJS()
+  window.removeEventListener('resize', onWindowResize)
+})
 </script>
 
 <style scoped>
